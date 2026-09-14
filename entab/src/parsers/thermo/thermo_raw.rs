@@ -25,19 +25,46 @@ impl<'b: 's, 's> FromSlice<'b, 's> for PascalString16 {
         _state: &mut Self::State,
     ) -> Result<bool, EtError> {
         let length = usize::try_from(extract::<u32>(buffer, &mut 0, &mut Endian::Little)?)?;
-        if buffer.len() < 4 + 2 * length {
+        // advance read pointer by four bytes for the unsigned int and two per wide char
+        let length_str = 4 + 2 * length;
+
+        // for the function to be correct, the string must be fully contained within the provided
+        // buffer. Its length must be at least two if the newline sequence is present. The last
+        // two bytes of the string must be the newline sequence.
+        if buffer.len() < length_str {
             return Err(EtError::from("PascalString ended abruptly").incomplete());
         }
-        *consumed += 4 + 2 * length;
+        if length_str < 6 {
+            // this implies that the file is corrupted or that the string is not prefaced by an int.
+            return Err(EtError::from("Incorrect string length provided for PascalString."));
+        }
+        // assert that the string ended by searching for the two-byte pattern
+        let end_of_line = u16::from_le_bytes([buffer[length_str - 2], buffer[length_str - 1]]);
+        if end_of_line != 0x000A {
+            return Err(EtError::from("PascalString does not end with newline"));
+        }
+
+        *consumed += length_str;
         Ok(true)
     }
 
     fn get(&mut self, buffer: &'b [u8], _state: &'s Self::State) -> Result<(), EtError> {
-        let iter = (4..buffer.len())
-            .map(|i| u16::from_le_bytes([buffer[i], buffer[i + 1]]));
+        let iter = (4..buffer.len()).map(|i| u16::from_le_bytes([buffer[i], buffer[i + 1]]));
         self.0 = decode_utf16(iter)
             .map(|r| r.unwrap_or(REPLACEMENT_CHARACTER))
             .collect::<String>();
+        Ok(())
+    }
+
+    fn read_entire_file(buffer: &[u8], eof: bool) -> Result<(), EtError> {
+        // Make sure the entire file is read in. Unfortunately a few of the metadata fields needed
+        // to parse the main data body are located near the end of the file (e.g. times,
+        // transformation coefficients to convert raw signals into m/zs) so this would basically
+        // happen anyhow. By doing it here, we prevent having to reparse because of an incomplete
+        // elsewhere.
+        if !EndOfFile::parse(buffer, eof, &mut 0, &mut ())? {
+            return Err(EtError::from("File is incomplete").incomplete());
+        }
         Ok(())
     }
 }
@@ -304,6 +331,7 @@ impl<'b: 's, 's> FromSlice<'b, 's> for ThermoRawState {
         // transformation coefficients to convert raw signals into m/zs) so this would basically
         // happen anyhow. by doing it here, we prevent having to reparse because of an incomplete
         // elsewhere
+        // TODO this is its own function!
         if !EndOfFile::parse(buffer, eof, &mut 0, &mut ())? {
             return Ok(false);
         }
